@@ -1,616 +1,457 @@
-# ATTIS — Acoustic Tracking and Target Identification System
+# ATTIS: Acoustic Tracking and Target Identification System
 
-> An embedded acoustic perception system for real-time sound-source localization using a three-microphone array, ESP32-based signal processing, and direction-of-arrival estimation.
+**A low-cost embedded acoustic perception module that estimates the direction of a sound source in real time using a three-microphone array and an ESP32.**
+
+| Platform | Sensors | Method | Range | Accuracy |
+|---|---|---|---|---|
+| ESP32-WROOM | 3 x MAX9814 | Direction-of-Arrival (DOA) estimation | ~1.5–2 m | ~±15–25° |
 
 ---
 
 ## Table of Contents
 
-- [Overview](#overview)
-- [Motivation](#motivation)
-- [Problem Statement](#problem-statement)
-- [Proposed Solution](#proposed-solution)
-- [System Architecture](#system-architecture)
-- [Hardware](#hardware)
-- [Signal Processing & Localization](#signal-processing--localization)
-- [Embedded Implementation](#embedded-implementation)
-- [Experimental Setup](#experimental-setup)
-- [Results](#results)
-- [Challenges & Engineering Trade-offs](#challenges--engineering-trade-offs)
-- [My Contributions](#my-contributions)
-- [Potential Applications](#potential-applications)
-- [Future Development](#future-development)
-- [Technology Stack](#technology-stack)
-- [Repository Structure](#repository-structure)
-- [Key Takeaways](#key-takeaways)
-- [Project Information](#project-information)
-- [Author](#author)
-- [License](#license)
+1. [Overview](#overview)
+2. [Motivation](#motivation)
+3. [Problem Statement](#problem-statement)
+4. [System Architecture](#system-architecture)
+5. [Hardware](#hardware)
+6. [Localization Principle](#localization-principle)
+7. [Signal Processing Pipeline](#signal-processing-pipeline)
+8. [Embedded Implementation](#embedded-implementation)
+9. [Getting Started](#getting-started)
+10. [Experimental Setup](#experimental-setup)
+11. [Results](#results)
+12. [Challenges and Engineering Trade-offs](#challenges-and-engineering-trade-offs)
+13. [Limitations](#limitations)
+14. [Roadmap](#roadmap)
+15. [Potential Applications](#potential-applications)
+16. [Repository Structure](#repository-structure)
+17. [Technology Stack](#technology-stack)
+18. [My Contributions](#my-contributions)
+19. [Key Takeaways](#key-takeaways)
+20. [Author](#author)
+21. [License](#license)
 
 ---
 
 ## Overview
 
-**ATTIS (Acoustic Tracking and Target Identification System)** is a low-cost embedded acoustic localization platform designed to estimate the direction of a sound source in real time.
+ATTIS is a proof-of-concept acoustic localization system built from inexpensive, off-the-shelf components. Three MAX9814 microphone modules, arranged in a triangular array roughly 120° apart, feed an ESP32 microcontroller. The ESP32 samples all three channels, compares the signals across the array, and estimates the bearing **θ** of the incoming sound.
 
-The system uses a **three-microphone array** arranged in a triangular configuration. Audio signals captured by the microphones are acquired and processed by an **ESP32 microcontroller**, which compares the signals across the array to estimate the direction from which the sound originates.
+The entire pipeline, from acquisition to direction estimate, runs on the microcontroller with no host computer in the loop. That makes ATTIS a practical starting point for an acoustic perception module on mobile robots and drones.
 
-The project explores acoustic sensing as an alternative and complementary perception modality for autonomous systems, particularly in environments where conventional vision-based perception becomes unreliable.
-
-### Core Pipeline
-
-```text
-   Acoustic Source
-         │
-         ▼
-┌─────────────────────┐
-│ 3-Microphone Array  │
-└──────────┬──────────┘
-           │
-           ▼
-┌─────────────────────┐
-│ ESP32 Acquisition & │
-│ Signal Processing   │
-└──────────┬──────────┘
-           │
-           ▼
-┌─────────────────────┐
-│ Inter-Microphone    │
-│ Signal Comparison   │
-└──────────┬──────────┘
-           │
-           ▼
-┌─────────────────────┐
-│ Direction-of-Arrival│
-│ Estimation (θ)      │
-└──────────┬──────────┘
-           │
-           ▼
-┌─────────────────────┐
-│ Spatial Output      │
-└─────────────────────┘
+```mermaid
+flowchart LR
+    A[Acoustic source] --> B[3-mic array]
+    B --> C[ESP32 ADC sampling]
+    C --> D[Filtering]
+    D --> E[Inter-mic comparison]
+    E --> F[DOA estimate θ]
+    F --> G[Spatial output]
 ```
 
 ---
 
 ## Motivation
 
-Most autonomous robotic systems rely heavily on cameras and other visual sensors for perception. Vision-based sensing can degrade significantly in environments with:
+Most autonomous systems perceive the world through cameras and other line-of-sight sensors. These degrade sharply in:
 
-- Poor visibility or darkness
-- Smoke or dust
-- Occlusions
-- Confined or underground spaces
-- Limited line of sight
+- darkness or poor visibility
+- smoke, dust, or fog
+- cluttered scenes with occlusions
+- confined, collapsed, or underground spaces
 
-Sound, in contrast, can propagate around obstacles and does not require a direct visual path to the source. This motivates the use of acoustic perception as a complementary sensing modality.
+Sound behaves differently. It diffracts around obstacles and does not need a clear visual path to its source. A robot in a disaster zone could use acoustic cues such as voices, knocking, alarms, or machinery to decide where to search next, even when its cameras see nothing useful.
 
-For example, a robot operating in a disaster environment could use acoustic information to identify the direction of:
-
-- Human voices
-- Knocking or tapping
-- Machinery
-- Alarms
-- Other characteristic sound sources
-
-ATTIS was developed as a proof-of-concept to investigate whether a low-cost embedded microphone array can provide useful directional information in real time.
+ATTIS was built to answer a focused question: **can a low-cost embedded microphone array produce directional information that is useful in real time?**
 
 ---
 
 ## Problem Statement
 
-The objective of ATTIS is to develop an embedded system capable of:
+Design an embedded system that can:
 
-1. Acquiring audio signals from multiple spatially distributed microphones.
-2. Processing the signals in real time on a microcontroller.
-3. Comparing the signals received at different microphones.
-4. Estimating the direction of the incoming sound.
-5. Providing a spatially meaningful representation of the detected sound source.
+1. Acquire audio simultaneously from multiple spatially separated microphones.
+2. Process those signals in real time on a microcontroller.
+3. Compare the signals received at each microphone.
+4. Estimate the direction of arrival of the sound.
+5. Report that direction in a form a downstream system (a human operator or a robot controller) can use.
 
-The system was designed with future integration into autonomous robotic platforms in mind.
-
----
-
-## Proposed Solution
-
-ATTIS uses spatially separated microphones to exploit differences in the sound received at each microphone.
-
-When a sound source is not directly in front of the array, the acoustic wave reaches the microphones at different times and with different signal characteristics. These differences contain information about the **direction of arrival (DOA)** of the sound.
-
-```text
-             Acoustic Source
-                    │
-                    ▼
-          ┌──────────────────┐
-          │ Microphone Array │
-          └────────┬─────────┘
-                   │
-         ┌─────────┴─────────┐
-         ▼                   ▼
-  Signal Acquisition   Signal Comparison
-         │                   │
-         └─────────┬─────────┘
-                   ▼
-          Direction Estimation
-                   │
-                   ▼
-             Spatial Output
-```
+The design was kept compatible with future integration into autonomous robotic platforms.
 
 ---
 
 ## System Architecture
 
-The ATTIS prototype consists of four major subsystems:
+| Subsystem | Role |
+|---|---|
+| **Acoustic sensing** | Three MAX9814 modules at ~120° spacing provide spatially distributed audio measurements. |
+| **Signal acquisition** | Microphone outputs connect to the ESP32 analog inputs and are sampled continuously. |
+| **Processing and localization** | Signals are filtered and compared across channels. Differences in amplitude, phase, and arrival time encode the source direction. |
+| **Reporting** | The direction estimate is converted into low-latency output (serial, with wireless planned). |
 
-| # | Subsystem | Description |
-|---|-----------|-------------|
-| 1 | **Acoustic Sensing** | Three MAX9814 microphone modules arranged approximately 120° apart provide spatially distributed audio measurements. |
-| 2 | **Signal Acquisition** | Microphone outputs are connected to the ESP32's analog inputs, which sample the incoming signals for real-time processing. |
-| 3 | **Signal Processing & Localization** | Acquired signals are compared across microphones. Depending on source direction, they differ in **amplitude**, **relative phase**, and **arrival time** — differences used to estimate direction. |
-| 4 | **Reporting** | The estimated direction is converted into spatially meaningful, low-latency feedback. |
-
-### Microphone Array Geometry
-
-The three microphones are arranged approximately 120° apart, forming a triangular sensing geometry.
+### Array Geometry
 
 ```text
                 MIC 1
                   ●
                  / \
                 /   \
-               /     \
+               /  ●  \        ● (centre) = array reference point
               /       \
              /         \
             ●───────────●
          MIC 2         MIC 3
 
-          ≈ 120° spacing
+           ~120° angular spacing
 ```
 
-Localization performance depends on the relationship between:
-
-- Microphone spacing
-- Array geometry
-- Sound wavelength
-- Source distance
-- Environmental reflections
+A triangular layout gives three independent microphone pairs (1–2, 2–3, 3–1). With only two microphones, a source in front of the pair is indistinguishable from its mirror image behind it. The third microphone breaks this front-back ambiguity and allows a full 360° bearing estimate in the horizontal plane.
 
 ---
 
 ## Hardware
 
-### Components
+### Bill of Materials
 
-| Component | Quantity | Purpose |
-|-----------|:--------:|---------|
-| ESP32-WROOM Development Board | 1 | Embedded processing and signal acquisition |
-| MAX9814 Microphone Module | 3 | Acoustic signal acquisition |
-| Acoustic Receiver Structure | 1 | Spatial microphone arrangement |
+| Component | Qty | Purpose |
+|---|:-:|---|
+| ESP32-WROOM development board | 1 | Acquisition, processing, direction estimation |
+| MAX9814 microphone module (electret + AGC amplifier) | 3 | Acoustic signal acquisition |
+| Acoustic receiver structure | 1 | Fixes microphone positions and spacing |
 | Breadboard | 1 | Prototype assembly |
-| Jumper Wires | — | Electrical connections |
-| Power Supply | 1 | System power |
+| Jumper wires | – | Interconnects |
+| Power supply | 1 | System power |
 
 ### Electrical Architecture
 
 ```text
 ┌─────────────┐
 │ MAX9814 #1  │──┐
-└─────────────┘  │
-┌─────────────┐  │      ┌─────────────────────────┐
-│ MAX9814 #2  │──┼─────►│  ESP32 (ADC inputs)     │
-└─────────────┘  │      │                         │
-┌─────────────┐  │      │  • Signal acquisition   │
-│ MAX9814 #3  │──┘      │  • Signal processing    │
-└─────────────┘         │  • Direction estimation │
-                        └────────────┬────────────┘
-                                     │
-                                     ▼
-                              Direction Output
+└─────────────┘  │       ┌───────────────────────────┐
+┌─────────────┐  │       │   ESP32 (ADC inputs)      │
+│ MAX9814 #2  │──┼──────►│   - signal acquisition    │
+└─────────────┘  │       │   - filtering             │
+┌─────────────┐  │       │   - direction estimation  │
+│ MAX9814 #3  │──┘       └─────────────┬─────────────┘
+└─────────────┘                        │
+                                       ▼
+                                Direction output
 ```
 
-> **Note:** Exact GPIO assignments should be taken from the firmware in this repository.
+### Wiring
+
+<!-- TODO: Fill in from firmware. Prefer ADC1 pins (GPIO32–39); ADC2 is unavailable while Wi-Fi is active. -->
+
+| Signal | ESP32 pin |
+|---|---|
+| MAX9814 #1 OUT | GPIO__ |
+| MAX9814 #2 OUT | GPIO__ |
+| MAX9814 #3 OUT | GPIO__ |
+| VDD | 3.3 V |
+| GND | GND |
+
+> **Design note:** The MAX9814 has built-in automatic gain control (AGC). AGC adjusts each module's gain independently, which can distort amplitude comparisons between channels. Setting all three modules to the same fixed gain (via the GAIN pin) makes amplitude-based cues more consistent.
 
 ---
 
-## Signal Processing & Localization
+## Localization Principle
 
-The microphone signals are continuously sampled by the ESP32 and passed through a simplified processing pipeline:
+A sound wave from a distant source reaches the array as an approximately planar wavefront. Because the microphones sit at different positions, each one receives the same acoustic event with small differences in:
 
-```text
-Raw Microphone Signals
-         │
-         ▼
-    ADC Sampling
-         │
-         ▼
-   Signal Filtering
-         │
-         ▼
-  Signal Comparison
-         │
-         ▼
-Direction Estimation
-         │
-         ▼
-   Spatial Output
+- **Arrival time:** the wavefront reaches the nearest microphone first.
+- **Phase:** for a periodic signal, the arrival-time difference appears as a phase offset.
+- **Amplitude:** the nearer microphone typically sees a slightly stronger signal, especially at short range.
+
+For a pair of microphones separated by distance *d*, a far-field source at angle θ from the pair's axis produces a time difference of arrival (TDOA) of
+
+$$
+\Delta t = \frac{d \cos\theta}{c}
+$$
+
+where *c* ≈ 343 m/s is the speed of sound in air. Inverting this for each microphone pair, and combining the three pairwise estimates, yields the source bearing.
+
+### Practical implications
+
+- **Delays are tiny.** With 10 cm spacing, the largest possible delay is about 0.29 ms. Resolving it requires a high sampling rate and tight timing between channels.
+- **Spacing and wavelength are coupled.** If the spacing exceeds half the sound's wavelength, phase cues become ambiguous (spatial aliasing). Larger arrays give finer angular resolution but a lower usable frequency ceiling.
+- **Near-field sources break the planar assumption.** At very short range, the wavefront is curved and the simple formula above loses accuracy.
+
+The current firmware combines inter-microphone signal characteristics in a proof-of-concept estimator. More rigorous TDOA and frequency-domain methods are on the [roadmap](#roadmap).
+
+---
+
+## Signal Processing Pipeline
+
+```mermaid
+flowchart TD
+    A["Raw signals x₁(t), x₂(t), x₃(t)"] --> B[ADC sampling]
+    B --> C["DC-offset removal and filtering"]
+    C --> D[Inter-microphone comparison]
+    D --> D1[Amplitude differences]
+    D --> D2[Phase differences]
+    D --> D3[Arrival-time differences]
+    D1 --> E[DOA estimation]
+    D2 --> E
+    D3 --> E
+    E --> F["Bearing θ"]
 ```
-
-### Inter-Microphone Signal Comparison
-
-Because the microphones are spatially separated, the same acoustic event produces slightly different signals at each microphone.
-
-```text
-                Sound Source
-                     \
-                      \  Acoustic Wave
-                       \
-        ┌───────────────\───────────────┐
-        │                \              │
-        ▼                 ▼             ▼
-      MIC 1             MIC 2         MIC 3
-        │                 │             │
-        ▼                 ▼             ▼
-      x₁(t)             x₂(t)         x₃(t)
-```
-
-### Direction-of-Arrival Estimation
-
-The primary objective of the localization algorithm is to estimate **θ**, the direction of the sound source, by evaluating relative signal characteristics between microphones:
-
-```text
-         Microphone Differences
-                  │
-     ┌────────────┼────────────┐
-     ▼            ▼            ▼
- Amplitude      Phase      Arrival-Time
- Differences  Differences  Differences
-     │            │            │
-     └────────────┼────────────┘
-                  ▼
-           DOA Estimation
-                  │
-                  ▼
-             θ estimate
-```
-
-The current implementation is a proof-of-concept localization system, with scope for more sophisticated time-delay and frequency-domain methods in future versions.
 
 ---
 
 ## Embedded Implementation
 
-The ESP32 acts as the central processing unit of ATTIS. Its responsibilities include:
+The ESP32 is responsible for:
 
-- Acquiring and sampling microphone signals
-- Processing the sampled signals
-- Comparing signals across the microphone array
-- Estimating sound direction
-- Generating the system output
+- sampling all three microphone channels continuously
+- conditioning the sampled signals
+- comparing signals across the array
+- computing the direction estimate
+- emitting the result over serial
 
-The core localization pipeline runs entirely on the microcontroller, without requiring a desktop computer. This makes the system a suitable foundation for future mobile robotic integration.
+Running the full loop on-device keeps latency low and removes the need for a tethered computer, which is essential for eventual deployment on a mobile platform.
 
 ### Development Workflow
 
 ```text
-Microphone Selection
-        │
-        ▼
-Array Geometry Design
-        │
-        ▼
-Hardware Integration
-        │
-        ▼
-ESP32 Signal Acquisition
-        │
-        ▼
-Signal Processing
-        │
-        ▼
-Direction Estimation
-        │
-        ▼
-Controlled Experiments
-        │
-        ▼
-Performance Evaluation
+Microphone selection
+  → Array geometry design
+  → Hardware integration
+  → ESP32 signal acquisition
+  → Signal processing
+  → Direction estimation
+  → Controlled experiments
+  → Performance evaluation
 ```
+
+---
+
+## Getting Started
+
+<!-- TODO: Adjust paths and settings to match the repository. -->
+
+### Prerequisites
+
+- Arduino IDE (or PlatformIO) with the ESP32 board package installed
+- ESP32-WROOM development board
+- Three MAX9814 modules wired as described in [Wiring](#wiring)
+
+### Build and Flash
+
+1. Clone the repository:
+   ```bash
+   git clone https://github.com/<username>/ATTIS.git
+   ```
+2. Open the firmware in `src/`.
+3. Select the **ESP32 Dev Module** board and the correct COM port.
+4. Upload the firmware.
+5. Open the serial monitor at the configured baud rate to view direction estimates.
+
+### Usage
+
+Place the array on a flat surface away from walls, produce a sound (clap, tone, or speech) at a known angle, and read the estimated bearing from the serial output.
 
 ---
 
 ## Experimental Setup
 
-The prototype was tested by placing a sound source at controlled angular positions (θ) relative to the microphone array.
+A sound source was placed at controlled angular positions around the array, and the estimated bearing was compared against the true bearing.
 
 ```text
-              Sound Source
+              Sound source
                    ●
                   /
-                 /
-                / θ
+                 /  θ (true bearing)
+                /
                ▼
       ┌──────────────────┐
-      │    Microphone    │
-      │      Array       │
+      │ Microphone array │
       └──────────────────┘
 ```
 
-Multiple source positions were evaluated to determine the relationship between the actual and estimated source direction. Testing focused on:
+Evaluation covered:
 
-- Directional accuracy
-- Operating range
-- Noise sensitivity
-- Microphone response variation
-- Array geometry
-- Real-time performance
+- directional accuracy across multiple source angles
+- usable operating range
+- sensitivity to background noise
+- variation between individual microphone modules
+- effect of array geometry
+- real-time responsiveness
 
 ---
 
 ## Results
 
-The prototype successfully demonstrated real-time acoustic direction localization using low-cost hardware.
-
-### Measured Performance
-
-| Parameter | Result |
-|-----------|--------|
+| Metric | Result |
+|---|---|
 | Operating range | ~1.5–2 m |
-| Direction estimation accuracy | ~±15–25° |
-| Processing | Real-time |
-| Processing platform | ESP32 |
-| Microphone configuration | 3-channel triangular array |
+| Directional accuracy | ~±15–25° |
+| Processing | Real-time, fully on-device |
+| Platform | ESP32 |
+| Array | 3-channel triangular |
 
-The system was able to distinguish different sound-source directions in controlled environments, demonstrating the feasibility of a compact embedded microphone array as a directional acoustic sensor.
+The prototype reliably distinguished between source directions in controlled indoor conditions. This confirms that a compact, low-cost microphone array can act as a coarse directional acoustic sensor, which is sufficient for tasks such as orienting a robot toward a sound before handing off to finer sensors.
 
----
-
-## Challenges & Engineering Trade-offs
-
-| Challenge | Description | Implication |
-|-----------|-------------|-------------|
-| **Microphone sensitivity** | Individual modules vary in sensitivity, introducing errors into amplitude-based comparisons. | Calibration is important for consistent localization. |
-| **ADC resolution** | The ESP32's onboard ADC constrains the quality and consistency of analog acquisition. | Higher-quality ADCs or digital microphones could improve future versions. |
-| **Environmental noise** | Background sounds interfere with the target signal. | Filtering, frequency-domain processing, and sound classification can improve robustness. |
-| **Acoustic reflections** | Reflections from walls and nearby surfaces create multiple paths and distort the apparent direction of arrival. | Reverberant environments require more advanced algorithms. |
-| **Array geometry** | Placement trades off spatial resolution, physical size, operating frequency, and directional ambiguity. | Geometry must be co-designed with the target application. |
+<!-- TODO: Add a plot of estimated vs. true bearing and a photo of the prototype in media/. -->
 
 ---
 
-## My Contributions
+## Challenges and Engineering Trade-offs
 
-My primary contributions focused on embedded systems development, hardware integration, and acoustic signal processing.
+| Challenge | Description | Mitigation / Direction |
+|---|---|---|
+| **Microphone mismatch** | Modules differ in sensitivity, and AGC changes gain per channel. | Per-channel calibration; fixed-gain configuration. |
+| **ADC limitations** | The ESP32's onboard ADC is noisy and somewhat non-linear. | Calibration curves, oversampling, or an external ADC / I²S digital microphones. |
+| **Inter-channel timing skew** | A single multiplexed ADC samples channels one after another, adding a small artificial delay between them. | Compensate in software, or use simultaneously sampled inputs (I²S MEMS mics). |
+| **Environmental noise** | Background sound masks or biases the target signal. | Band-pass filtering, FFT-based processing, sound classification. |
+| **Reverberation** | Reflections from walls create multiple arrival paths and false bearings. | Onset detection, GCC-PHAT, and other robust TDOA methods. |
+| **Array geometry** | Spacing trades angular resolution against size and aliasing frequency. | Co-design geometry with the target sound band and platform size. |
 
-**Hardware Integration**
-- Designed and assembled the three-microphone acquisition system.
-- Integrated MAX9814 microphone modules with the ESP32.
-- Worked on microphone placement and system calibration.
+---
 
-**Embedded Development**
-- Implemented real-time microphone signal acquisition on the ESP32.
-- Developed the embedded signal-processing pipeline.
-- Implemented logic for comparing signals across the microphone array.
+## Limitations
 
-**Acoustic Localization**
-- Developed direction-estimation logic using inter-microphone signal characteristics.
-- Tested the system under controlled sound-source positions.
-- Investigated the effects of noise, microphone sensitivity, and array geometry.
+- Characterized in controlled indoor settings only; performance in open or highly reverberant spaces has not been quantified.
+- Designed for a single dominant source; simultaneous sources are not separated.
+- Estimates bearing (azimuth) only, not elevation or range.
+- Accuracy of ±15–25° suits coarse orientation, not precise targeting.
 
-**System Validation**
-- Conducted experiments to evaluate directional accuracy and operating range.
-- Characterized practical limitations of the low-cost microphone-array architecture.
-- Documented system-level trade-offs for future robotic integration.
+---
+
+## Roadmap
+
+### 1. Frequency-Domain Processing
+FFT-based analysis to isolate dominant frequencies and suppress out-of-band noise.
+
+```text
+Time-domain signal → FFT → Spectrum → Target-band selection
+```
+
+### 2. Improved Localization Algorithms
+- Cross-correlation-based TDOA
+- GCC-PHAT for robustness to reverberation
+- Delay-and-sum and adaptive beamforming
+- Multi-source localization
+
+### 3. Hardware Upgrades
+- I²S MEMS microphones for simultaneous, digitally sampled channels
+- A rigid, precisely dimensioned array mount
+- A fourth microphone for elevation estimation
+
+### 4. Sound Classification
+Pair localization with lightweight ML classification so the system reports both *where* a sound is and *what* it is.
+
+```mermaid
+flowchart LR
+    A[Audio input] --> B[Localization]
+    A --> C[Classification]
+    B --> D[Source direction]
+    C --> E[Sound type]
+    D --> F[Acoustic scene understanding]
+    E --> F
+```
+
+### 5. Closed-Loop Sound Tracking
+Mount ATTIS on a mobile robot and use the bearing estimate to rotate and drive toward the source, updating continuously.
+
+```mermaid
+flowchart LR
+    A[Detect sound] --> B[Estimate bearing]
+    B --> C[Orient robot]
+    C --> D[Move toward source]
+    D --> A
+```
+
+### 6. Wireless Output and Sensor Fusion
+Stream bearings over Wi-Fi or ESP-NOW to a higher-level controller (for example, a ROS 2 node) and fuse them with camera, LiDAR, IMU, ultrasonic, and GNSS data.
+
+```mermaid
+flowchart LR
+    A[Camera] --> E[Sensor fusion]
+    B[LiDAR] --> E
+    C[IMU] --> E
+    D[ATTIS] --> E
+    E --> F[Robot perception]
+    F --> G[Navigation / target tracking]
+```
+
+### Long-Term Vision
+Evolve ATTIS from a direction detector into a complete acoustic perception module: localization and classification feeding a multimodal perception stack that drives navigation and target tracking.
 
 ---
 
 ## Potential Applications
 
-- 🚑 **Search and Rescue** — Identify the direction of voices, tapping, or other signals in collapsed structures, smoke-filled or low-visibility environments, and underground spaces.
-- 🤖 **Autonomous Robotics** — Serve as an acoustic perception module for robots where visual sensing is unreliable, feeding direction estimates into navigation or target-tracking.
-- 🏭 **Industrial Monitoring** — Identify abnormal machinery sounds and estimate their spatial origin.
-- 🐦 **Wildlife Monitoring** — Locate animal calls where direct visual observation is difficult.
-- 🏢 **Smart Infrastructure** — Distributed acoustic sensors for spatial event detection and environmental monitoring.
+- **Search and rescue:** locate voices or tapping in collapsed structures, smoke-filled rooms, and underground spaces.
+- **Autonomous robotics:** an acoustic sensing channel for robots and drones operating where vision is unreliable.
+- **Industrial monitoring:** detect abnormal machinery sounds and localize their origin.
+- **Wildlife monitoring:** locate animal calls in dense or low-visibility habitats.
+- **Smart infrastructure:** distributed acoustic nodes for spatial event detection.
 
 ---
 
-## Future Development
+## Repository Structure
 
-### 🎵 1. Frequency-Domain Processing
-
-FFT-based processing to identify dominant frequencies and separate target sounds from background noise.
+<!-- TODO: Update to match the actual repository layout. -->
 
 ```text
-Time-Domain Signal → FFT → Frequency Spectrum → Target Frequency Detection
-```
-
-### 🎯 2. Improved Localization Algorithms
-
-- Time Difference of Arrival (TDOA)
-- Cross-correlation
-- GCC-PHAT
-- Beamforming
-- Multi-source localization
-
-### 🧠 3. Sound Classification
-
-Combine localization with machine-learning-based classification to determine not only *where* a sound originates but potentially *what* it is.
-
-```text
-             Audio Input
-                  │
-         ┌────────┴────────┐
-         ▼                 ▼
-    Localization     Classification
-         │                 │
-         ▼                 ▼
-   Source Direction    Sound Type
-         │                 │
-         └────────┬────────┘
-                  ▼
-        Acoustic Scene Understanding
-```
-
-### 🤖 4. Autonomous Sound Tracking
-
-Integrate ATTIS with a mobile robot so the estimated direction can orient the robot toward the source in a closed loop.
-
-```text
- Sound Source
-      │
-      ▼
-Acoustic Detection ─► Direction Estimation ─► Robot Orientation
-                                                     │
-      ┌──────────────────────────────────────────────┘
-      ▼
-Motion Toward Source ─► Continuous Update ─┐
-      ▲                                    │
-      └────────────────────────────────────┘
-```
-
-### 📡 5. Wireless Integration
-
-Transmit localization data wirelessly to a higher-level robotic controller or distributed autonomous system.
-
-### 🧭 6. Sensor Fusion
-
-Combine acoustic localization with complementary sensors — IMU, camera, LiDAR, ultrasonic sensors, and GNSS where available.
-
-```text
-Camera ──────┐
-LiDAR ───────┤
-             ├──► Sensor Fusion ──► Robot Perception
-IMU ─────────┤
-ATTIS ───────┘
-```
-
-### 🚀 Long-Term Vision
-
-The long-term goal is to evolve ATTIS from a simple direction detector into a complete **acoustic perception module** for autonomous robots, combining localization and classification within a multimodal perception stack:
-
-```text
-        ┌──────────────────┐
-        │ Microphone Array │
-        └────────┬─────────┘
-                 ▼
-        ┌──────────────────┐
-        │ Acoustic         │
-        │ Localization     │
-        └────────┬─────────┘
-                 │
-      ┌──────────┴──────────┐
-      ▼                     ▼
-Source Direction     Sound Classification
-      │                     │
-      └──────────┬──────────┘
-                 ▼
-        ┌──────────────────┐
-        │  Sensor Fusion   │
-        └────────┬─────────┘
-                 ▼
-        ┌──────────────────┐
-        │ Robot Perception │
-        └────────┬─────────┘
-                 ▼
-        ┌──────────────────┐
-        │ Navigation /     │
-        │ Target Tracking  │
-        └──────────────────┘
+ATTIS/
+├── src/          ESP32 firmware
+├── data/         Experimental recordings and measurements
+├── analysis/     Evaluation and plotting scripts
+├── hardware/     Schematics and array mechanical design
+├── media/        Photos and demonstration videos
+└── README.md
 ```
 
 ---
 
 ## Technology Stack
 
-**Hardware**
-- ESP32-WROOM
-- 3 × MAX9814 microphone modules
-- Custom acoustic receiver structure
-- Breadboard, jumper wires, power supply
+**Hardware:** ESP32-WROOM, 3 x MAX9814 microphone modules, custom array structure
 
-**Software**
-- Embedded C/C++
-- ESP32 Arduino framework
-- Digital signal processing
-- Real-time data acquisition
-- Serial communication
+**Software:** Embedded C/C++, Arduino framework for ESP32, serial communication
 
-**Core Concepts**
-- Microphone arrays
-- Direction of Arrival (DOA)
-- Acoustic localization
-- Signal processing
-- Embedded systems
-- Sensor integration
-- Robotic perception
-- Sensor fusion
+**Concepts:** Microphone arrays, direction-of-arrival estimation, TDOA, digital signal processing, real-time data acquisition, sensor integration, robotic perception, sensor fusion
 
 ---
 
-## Repository Structure
+## My Contributions
 
-<!-- TODO: Update the folder names below to match the actual repository structure. -->
+**Hardware integration**
+- Designed and assembled the three-microphone acquisition system.
+- Integrated the MAX9814 modules with the ESP32.
+- Determined microphone placement and performed system calibration.
 
-```text
-ATTIS/
-│
-├── src/          # ESP32 firmware and embedded processing
-├── data/         # Experimental data
-├── analysis/     # Signal analysis and evaluation scripts
-├── hardware/     # Hardware and circuit documentation
-├── media/        # Images and demonstration media
-└── README.md
-```
+**Embedded development**
+- Implemented real-time multi-channel signal acquisition on the ESP32.
+- Built the on-device signal-processing pipeline.
+- Implemented cross-channel signal comparison logic.
+
+**Acoustic localization**
+- Developed the direction-estimation logic from inter-microphone signal characteristics.
+- Investigated the effects of noise, microphone mismatch, and array geometry.
+
+**Validation**
+- Designed and ran controlled experiments to measure accuracy and operating range.
+- Characterized the practical limits of a low-cost microphone-array architecture.
+- Documented system-level trade-offs to guide future robotic integration.
 
 ---
 
 ## Key Takeaways
 
-ATTIS demonstrates how a relatively simple and inexpensive sensor configuration can be developed into a real-time perception system, covering:
-
-- Embedded systems and sensor interfacing
-- Real-time data acquisition
-- Digital signal processing
-- Acoustic localization
-- Experimental characterization
-- Hardware–software integration
-
-The project follows the chain:
+ATTIS traces the complete chain from physics to perception:
 
 **Physical sensing → Embedded acquisition → Signal processing → Spatial inference → Robotic perception**
 
-The resulting prototype provides a foundation for extending acoustic sensing toward autonomous sound-source localization, tracking, and multimodal robotic perception.
+It shows that a deliberately simple, inexpensive sensor configuration can be engineered into a working real-time perception system, and it exposes the real constraints (ADC quality, timing, mismatch, reverberation) that any serious acoustic localization system has to solve.
 
----
+A detailed project report covering problem formulation, hardware design, methodology, experimental results, limitations, and the development roadmap accompanies this repository.
 
-## Project Information
-
-| Parameter | Details |
-|-----------|---------|
-| Project | ATTIS — Acoustic Tracking and Target Identification System |
-| Domain | Embedded Systems / Acoustic Perception |
-| Platform | ESP32 |
-| Sensors | 3 × MAX9814 microphones |
-| Core Concept | Acoustic Direction-of-Arrival Estimation |
-| Output | Real-time sound-source direction |
-| Type | Instrumentation Project |
-| Operating Range | ~1.5–2 m |
-| Measured Directional Accuracy | ~±15–25° |
-
-### Detailed Report
-
-The complete project report covers: problem formulation, motivation and applications, hardware architecture, microphone-array configuration, signal-processing methodology, direction-estimation approach, experimental methodology, results and observations, system limitations, and the future development roadmap.
-
----
-
-## Author
-
-**Lavanya Bhatnagar**
-Mechanical Engineering
-Indian Institute of Technology Indore
-
----
 
 ## License
 
-This repository is intended primarily for academic and educational purposes.
-If you use or extend this project, please provide appropriate attribution.
+This project is intended for academic and educational use. If you use or build on this work, please provide appropriate attribution.
+
+<!-- Consider adding a formal license file (e.g. MIT) so the terms are unambiguous. -->
